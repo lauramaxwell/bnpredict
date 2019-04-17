@@ -1,0 +1,219 @@
+---
+title: "Using Bayesian Networks for Imputation"
+author: "Laura Maxwell"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Using Bayesian Networks for Imputation}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+###Imputation and Value Prediction
+
+Missing data is a major problem for anyone working with large datasets. There have been many approaches to dealing with missing data, from list-wise deletion of missing data to imputation via multivariate logistic regression. This packages provides a framework to use Bayesian networks to predict, evaluate and impute missing or held-out data using network-based expectation maximization.  This method is particularly well suited for highly dimensional categorical data that doesn't behave well with traditional imputation approaches.
+
+In the following vignette, I will walk through an example in which we:
+
+1. Create the structure of a bayesian network 
+2. Hold out 25% of the values of the `job` feature in the dataset, creating missing data to predict.
+3. Train the bayesian network with the truncated dataset
+4. Predict the "missing" values using [Most Probable Explanation]() technique
+5. Evaluate the model
+6. Visualize the evaluation process
+7. Impute the data 
+
+#### Creating the Bayesian Network 
+
+The first step is to create a Bayesian Network using all of the relevant features in the data.  A Bayesian network is a graphical model that is directed and acyclical. The structure is theoretically informed and the graph conveys dependencies of features. See [these lecture notes](http://mlg.eng.cam.ac.uk/zoubin/talks/lect2gm.pdf) for an overview on bayesian networks and graphical models more generally.
+
+This package relies on the `bnlearn` and `gRain` packages. More information on the `bnlearn` package and the creation of network structures can be found [here.](http://www.bnlearn.com/) and information about the `gRain` package and the querying process can be found [here.](https://cran.r-project.org/web/packages/gRain/vignettes/gRain-intro.pdf)
+
+The network created below has a joint probability distribution that is represented mathematically in the `model2network` function and graphically in the plot below. This joint probability distribution creates the dependencies which are used to construct conditional probability tables below, when we introduce data.
+
+```{r}
+net <- bnlearn::model2network("[compensation|age:full_time][age]
+                          [job|compensation:full_time][full_time]
+                          [cluster|job:compensation:age:full_time]")
+```
+
+```{r, eval = F}
+bnlearn::graphviz.plot(net, shape="ellipse")
+```
+
+
+```{r, fig.show = 'hold', fig.align = 'center', echo=FALSE}
+suppressMessages(bnlearn::graphviz.plot(net, shape="ellipse"))
+```
+
+----
+
+####Creating Missing Data and Training the Network
+
+The data we are using for this example has 1891 complete observations with 5 features.  The features are age, compensation, job, full_time and cluster.  The number of categories in each feature are displayed below.
+
+```{r, echo=FALSE}
+this <- cbind(colnames(dat), as.vector(plyr::aaply(colnames(dat), 1, function(x) length(levels(as.factor(dat[,x]))))))
+colnames(this) <- c("feature", "# categories")
+knitr::kable(this)
+```
+
+If our task is to predict and ultimately impute missing values from datasets, we must determine how well this model does at predicting missing values. Therefore, for this example where we have no missing data, it is crucial to construct some missing data from a dataset.  This will then allow us to go back to the original dataset and evaluate whether or not the predictions are correct.
+
+In this dataset. we will create 500 missing job titles:
+
+```{r}
+data(dat, package = "bnpredict")
+dat25 <- dat
+dat25[sample(1:nrow(dat25),500),]$job <- NA
+```
+
+Using this new dataset, `dat25`, we will populate the network with conditional probability tables using only the observations that are complete using the `bn.fit` function. 
+
+```{r, , eval = F}
+emp_net25 <- bnlearn::bn.fit(net, data = na.omit(dat25), method = "mle")
+emp_bn25 <-  gRbase::compile(bnlearn::as.grain(emp_net25))
+```
+
+```{r, , echo = F}
+suppressWarnings(emp_net25 <- bnlearn::bn.fit(net, data = na.omit(dat25), method = "mle"))
+suppressWarnings(emp_bn25 <-  gRbase::compile(bnlearn::as.grain(emp_net25)))
+```
+
+This code does the following:
+
+1. train the bayesian network on that data (`emp_net25`) from the network structure object (`net`)
+2. convert it to the proper class for use in the `m_predict` function (`emp_bn25`)
+
+
+Note that you may recieve warnings from the `bn.fit` and `compile` functions. These warning messages are normal and occur because `"job"` is a factor, and by eliminating 25% of the observations, some of the levels of the factor are not in the training data set. They will not impact your analysis.
+
+----
+
+####Finding the Most Probable Explanations (MPEs) of the missing observations with `m_predict`
+
+The `m_predict` function queries the learned network that is populated with conditional probability tables (in this case `emp_bn25`) to determine the most probable value for a missing feature given the values of all other features in that observation. 
+
+In the example below, we are missing the `job` feature in a few observations. The `m_predict` function uses the observed data from `age`, `compensation`, `full_time` and `cluster` features to determine the value for `job` with the maximum probability.  Note that the `age` and  `compensation`  values represent the bucket that the respondent falls in, not a continuous value.
+
+```{r, echo = F}
+tab <- cbind(as.numeric(dat25[1:10,1]),as.numeric(dat25[1:10,2]), dat25[1:10,c(3,4)], as.numeric(dat25[1:10,5]))
+colnames(tab) <- colnames(dat25)
+knitr::kable(tab)
+```
+
+We can do this on the first missing value to display what the raw output looks like:
+
+```{r}
+m_predict(dat= dat25, network= emp_bn25, r= as.numeric(rownames(dat25[1,])),missing_var = "job")
+```
+
+The output of this procedure has 6 features:
+
+- `m1`: most probable value for the missing feature                                                    
+- `m1_prob`: probability of `m1`                                                                       
+- `m2`: second most probable value for the missing feature            
+- `m2_prob`: probability of `m2`                                         
+- `m3`: third most probable value for the missing feature   
+- `m3_prob`: probability of `m3`  
+
+
+It is most useful to apply this function to each row with missing data, so using the function `m_predict` in combination with `adply`, we create a matrix of the top three most probable missing features (in this case job titles) and append them to the original, complete dataset (`dat`) so that we can compare actual job titles to predicted job titles.
+
+```{r}
+job_pred <- plyr::adply(dat[is.na(dat25$job) == T,], 1, 
+                          function(x) m_predict(dat= dat, 
+                                               network= emp_bn25, 
+                                               r= max(as.numeric(rownames(x))), 
+                                               missing_var = "job"))
+```
+
+```{r, echo = F}
+job_pred <- na.omit(job_pred)
+```
+
+In this case, `dat[is.na(dat25$job) == T,]` is all of the original, complete data in which we created missing job titles. 
+
+The output (`job_pred`) will allow us to test the accuracy of the model by comparing m1 to the actual value of the missing feature, `"job"`.
+
+----
+
+### Thresholds
+
+It is important to note that the MPE for a particular observation is not necessarily going to be a very probable explanation.  In looking at the histogram below, it is clear that while the mode is near 1, there are a lot of MPE probabilities that fall below .5, and as the  probabilities decrease, it becomes more likely that these MPEs do not match the true value.  Because of this, selecting a minimum threshold that the MPE probability must meet in order to be imputed is important to ensuring that the imputations are accurate.
+
+```{r, echo = F, fig.width = 7, fig.height = 4.2}
+job_pred$match <- as.character(job_pred$m1) == as.character(job_pred$job)
+job_pred$Prediction <- factor(job_pred$match, levels = c("FALSE", "TRUE"), 
+                              labels = c("Not Match", "Match"))
+
+ggplot2::ggplot(job_pred, ggplot2::aes(x = as.numeric(m1_prob), fill = Prediction)) + 
+  ggplot2::geom_histogram(binwidth = .99/30) +
+  ggplot2::scale_fill_manual( values = c("firebrick1", "slategray3")) +
+  ggplot2::labs(x = "MPE probability", title = "Distribution of job MPE probabilities and correct predictions") +
+  ggplot2::theme_classic()
+```
+
+To evaluate model fit and determine an appropriate threshold of imputation, we use the `thresh_pred` command. The output of this command will help us evaluate the model and a range of thresholds by telling us how many values are correctly predicted (_matches_) and how many values are incorrectly predicted (_does not match_) among the MPEs that were as least as probable as the threshold (_hits_ the threshold) and those MPEs probabities were not higher than the threshold (_does not hit_ the threshold).   
+
+
+```{r}
+job_thresh <-  thresh_pred(job_pred, missing_var="job")
+```
+
+The output of this function (`job_thresh`) is a dataframe with 8 rows and as many columns as number of thresholds (default is 21- 0% to 100% by 5%)
+
+The rows indicate:
+
+ if the predicted value _matches_ the actual value and _hits_ the threshhold 
+ 
+  - `count_match_thresh` and `prop_match_thresh`
+  
+ if the predicted value _does not match_ and _hits_ the threshhold 
+ 
+  - `count_nomatch_thresh` and `prop_nomatch_thresh`
+  
+ if the predicted value _matches_ and _does not hit_ the threshhold 
+ 
+  - `count_match_nothresh` and `prop_match_nothresh`
+  
+ if the predicted value _does not match_ and _does not hit_ the threshhold 
+ 
+  - `count_nomatch_nothresh` and `prop_nomatch_nothresh` 
+  
+```{r, echo=FALSE, results='asis'}
+ knitr::kable(job_thresh[,c(1:10)], digits = 2)
+ knitr::kable(job_thresh[,c(11:21)], digits = 2)
+```
+
+You can also input a custom range of thresholds: 
+
+```{r}
+job_thresh_cut <-  thresh_pred(job_pred, missing_var="job", 
+                               threshold = seq(from = 0.5, to = 0.9, by = 0.05))
+```
+
+```{r, echo=FALSE, results='asis'}
+knitr::kable(job_thresh_cut, digits = 2)
+```
+
+
+### Visualizing Thresholds
+
+It is often useful to visualize the output of the threshold predictions from the `thresh_pred` function in order to better understand the tradeoffs between imputing more values and increasing the probability of imputing correct values.  The `thresh_viz` function does this by simply taking the output of `thresh_pred` and producing a stacked bar plot of the output.  The defaults produce the following graph:
+
+```{r, fig.width = 8, fig.height = 5, warn = -1}
+thresh_viz(job_thresh_cut)
+```
+
+Alternatively, you can customize the plot to include the counts of each category as well as choose  different colors and labels.
+
+```{r, fig.width = 8, fig.height = 5, warn = -1}
+thresh_viz(job_thresh_cut, colors = c("lightskyblue1", "darkorange1", "darkorange3", "lightskyblue3"),
+           main = "My Custom Title", text = T, t.size = 3)
+```
+
+
+
+
+

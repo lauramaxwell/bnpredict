@@ -1,0 +1,19 @@
+Package: bnpredict
+Title: Value Prediction and Imputation using Bayesian Networks
+Version: 0.0.0.9000
+Authors@R: person("Laura", "Maxwell", email = "laura.maxwell@emory.edu", role = c("aut", "cre"))
+Description: Use Bayesian Networks produced by the user with the bnlearn package to predict missing
+            categorical values, validate predictions, determine the viability of existing values
+            given the values of the other features. Also includes validation visualization capabilities.
+Depends: 
+    R (>= 3.2.2)
+License: What license is it under?
+LazyData: true
+RoxygenNote: 5.0.1.9000
+Imports: bnlearn,
+         ggplot2,
+         gRain,
+         plyr
+Suggests: knitr,
+    rmarkdown
+VignetteBuilder: knitr
